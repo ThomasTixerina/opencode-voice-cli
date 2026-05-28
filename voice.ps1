@@ -1,34 +1,42 @@
 #!/usr/bin/env pwsh
 <#
 .SYNOPSIS
-  Voice CLI — Habla con OpenCode AI
+  Voice CLI \u2014 Habla con OpenCode AI
 .DESCRIPTION
   Wrapper para voice-cli.py y voice-agent.pyw.
   Usa Groq Whisper (STT) + edge-tts (TTS) + SendKeys.
 .PARAMETER Record
-  Graba voz y transcribe
+  Graba voz y transcribe a texto (copiado al portapapeles)
 .PARAMETER Speak
   Lee texto en voz alta
 .PARAMETER Hear
-  Lee el portapapeles
+  Lee el portapapeles en voz alta
 .PARAMETER Listen
-  Modo wake word + auto-type
+  [Fase2] Modo wake word: escucha "oye open..." y auto-escribe
 .PARAMETER Watch
-  Vigila archivo y lee cambios
+  Vigila un archivo y lee cambios en voz alta
 .PARAMETER AutoType
-  Auto-escritura en terminal activa
+  Auto-escritura en terminal activa (con --listen)
 .PARAMETER Duration
-  Duracion de grabacion en segundos
+  Duracion de grabacion en segundos (default: 5)
 .PARAMETER Voice
-  Voz TTS
+  Voz TTS (default: es-MX-JorgeNeural)
 .PARAMETER Agent
-  Inicia agente de fondo
+  Inicia el agente de fondo (voice-agent.pyw)
 .PARAMETER Install
-  Instala en Windows startup
+  Instala el agente en Windows startup
 .PARAMETER Uninstall
-  Desinstala de startup
+  Desinstala el agente de Windows startup
 .PARAMETER Status
-  Muestra estado
+  Muestra estado del agente
+.EXAMPLE
+  voice --record
+  voice --speak "Hola mundo"
+  voice --hear
+  voice --listen --auto-type
+  voice --agent
+  voice --install
+  voice --status
 #>
 
 param(
@@ -51,6 +59,7 @@ $CLI = Join-Path $ScriptDir "voice-cli.py"
 $AgentScript = Join-Path $ScriptDir "voice-agent.pyw"
 $Installer = Join-Path $ScriptDir "install-agent.ps1"
 
+# --- Agent management ---
 if ($Install) {
   & $Installer -Install
   return
@@ -68,16 +77,17 @@ if ($Status) {
 
 if ($Agent) {
   if (-not (Test-Path $AgentScript)) {
-    Write-Error "voice-agent.pyw no encontrado"
+    Write-Error "voice-agent.pyw no encontrado en $ScriptDir"
     exit 1
   }
-  Write-Host "Iniciando Voice Agent..." -ForegroundColor Cyan
-  Start-Process pythonw -ArgumentList "`"$AgentScript`""
+  Write-Host "Iniciando Voice Agent en segundo plano..." -ForegroundColor Cyan
+  start-process pythonw -ArgumentList "`"$AgentScript`""
   return
 }
 
+# --- CLI commands ---
 if (-not (Test-Path $CLI)) {
-  Write-Error "voice-cli.py no encontrado"
+  Write-Error "voice-cli.py no encontrado en $ScriptDir"
   exit 1
 }
 

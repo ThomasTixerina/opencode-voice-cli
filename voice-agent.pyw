@@ -1,4 +1,3 @@
-# voice-agent.pyw runs with pythonw.exe (no console window)
 import asyncio
 import json
 import os
@@ -14,6 +13,7 @@ import numpy as np
 import sounddevice as sd
 import soundfile as sf
 from groq import Groq
+
 
 ENERGY_THRESHOLD = 0.02
 RATE = 16000
@@ -32,6 +32,25 @@ OUTPUT_FILE = OPENCODE_DIR / "voice-output.txt"
 LOG_FILE = OPENCODE_DIR / "voice-agent.log"
 TMP_MP3 = OPENCODE_DIR / "_tts.mp3"
 TMP_WAV = OPENCODE_DIR / "_tts.wav"
+
+
+STATE_IDLE = 0
+STATE_LISTENING = 1
+STATE_PROCESSING = 2
+STATE_SPEAKING = 3
+
+_agent_state = STATE_IDLE
+_state_lock = threading.Lock()
+
+def set_state(s):
+    global _agent_state
+    with _state_lock:
+        _agent_state = s
+
+def get_state():
+    with _state_lock:
+        return _agent_state
+
 
 _client = None
 _last_output_pos = 0
@@ -95,20 +114,28 @@ def transcribe(audio_data):
             pass
 
 
+def normalize(text):
+    text = text.lower().strip()
+    for ch in ".,!?¿¡:;\"'()-":
+        text = text.replace(ch, " ")
+    return " ".join(text.split())
+
+
 def extract_command(text):
+    raw = text
     text_lower = text.lower()
     wake_found = None
-    pos = -1
+    ww_pos = -1
     for ww in WAKE_WORDS:
         idx = text_lower.find(ww)
         if idx >= 0:
             wake_found = ww
-            pos = idx + len(ww)
+            ww_pos = idx
             break
     if wake_found is None:
         return None
 
-    cmd = text[pos:].strip().strip(".,!?¿¡:; ")
+    cmd = raw[ww_pos + len(wake_found):].strip().strip(".,!?¿¡:;\"'() ")
 
     for cw in CLOSE_WORDS:
         idx = cmd.lower().find(cw)
@@ -116,13 +143,16 @@ def extract_command(text):
             cmd = cmd[:idx].strip()
             break
 
-    return cmd if cmd else None
+    if not cmd:
+        log("Wake word detectado pero comando vacio")
+        return None
+    return cmd
 
 
 def type_keys(text):
     if not text:
         return
-    escaped = text.replace("'", "''").replace("{", "{{").replace("}", "}}")
+    escaped = text.replace("'", "''").replace("{", "{{}").replace("}", "{}}")
     escaped = escaped.replace("~", "{~}").replace("^", "{^}").replace("%", "{%}").replace("+", "{+}")
     ps = (
         "Add-Type -AssemblyName System.Windows.Forms; "
@@ -139,8 +169,21 @@ def type_keys(text):
         log(f"SendKeys error: {e}")
 
 
+def clean_tts(text):
+    text = text.strip()
+    text = text.lstrip("\ufeff\u00a0")
+    text = text.replace("\ufeff", "").replace("\u00a0", " ")
+    text = "".join(c for c in text if c.isprintable() or c in " \n.,!?¿¡:;\"'()-")
+    return text.strip()
+
+
 def speak_text(text):
+    text = clean_tts(text)
+    if not text:
+        return
+
     def _play():
+        set_state(STATE_SPEAKING)
         try:
             async def _gen():
                 import edge_tts
@@ -162,6 +205,7 @@ def speak_text(text):
                 TMP_WAV.unlink(missing_ok=True)
             except Exception:
                 pass
+            set_state(STATE_IDLE)
 
     t = threading.Thread(target=_play, daemon=True)
     t.start()
@@ -185,6 +229,7 @@ def audio_capture_loop():
                 if rms > ENERGY_THRESHOLD:
                     if not is_speaking:
                         is_speaking = True
+                        set_state(STATE_LISTENING)
                         speech_buffer = [chunk]
                     else:
                         speech_buffer.append(chunk)
@@ -197,6 +242,7 @@ def audio_capture_loop():
                             audio = np.concatenate(speech_buffer)
                             is_speaking = False
                             speech_buffer = []
+                            set_state(STATE_PROCESSING)
 
                             log(f"Audio capturado ({len(audio)/RATE:.1f}s)")
                             text = transcribe(audio)
@@ -209,8 +255,10 @@ def audio_capture_loop():
                                     speak_text(f"Listo: {cmd[:60]}")
                                 else:
                                     log("No contiene wake word")
+                                    set_state(STATE_IDLE)
                             else:
                                 log("Transcripcion vacia")
+                                set_state(STATE_IDLE)
     except Exception as e:
         log(f"Audio error: {e}")
         log(traceback.format_exc())
@@ -230,18 +278,65 @@ def file_watcher_loop():
         try:
             size = OUTPUT_FILE.stat().st_size
             if size > _last_output_pos:
-                with open(OUTPUT_FILE, "r", encoding="utf-8") as f:
+                with open(OUTPUT_FILE, "r", encoding="utf-8-sig") as f:
                     f.seek(_last_output_pos)
                     new_content = f.read().strip()
-                _last_output_pos = size
+                _last_output_pos = OUTPUT_FILE.stat().st_size
                 if new_content:
-                    log(f"Leyendo respuesta: {new_content[:80]}...")
+                    log(f"Respuesta: {new_content[:80]}...")
                     speak_text(new_content)
-            elif size < _last_output_pos:
+            elif size == 0 or size < _last_output_pos:
                 _last_output_pos = 0
         except Exception as e:
             log(f"Watcher error: {e}")
         time.sleep(1)
+
+
+def indicator_loop():
+    try:
+        import tkinter as tk
+
+        S = {"bg": "#1a1a1a", "fg": "white", "font": ("Segoe UI", 10, "bold")}
+        COLORS = {STATE_IDLE: "#22c55e", STATE_LISTENING: "#eab308", STATE_PROCESSING: "#3b82f6", STATE_SPEAKING: "#ef4444"}
+        TEXTS  = {STATE_IDLE: "Escuchando", STATE_LISTENING: "Escuchando...", STATE_PROCESSING: "Procesando...", STATE_SPEAKING: "Hablando..."}
+        LABELS = {STATE_IDLE: "Activo", STATE_LISTENING: "Te escucho", STATE_PROCESSING: "Pensando", STATE_SPEAKING: "Hablando"}
+
+        root = tk.Tk()
+        root.title("Voice Agent")
+        root.overrideredirect(True)
+        root.attributes("-topmost", True)
+        root.attributes("-alpha", 0.88)
+        root.configure(bg="#1a1a1a")
+
+        sw = root.winfo_screenwidth()
+        root.geometry(f"200x42+{sw-210}+10")
+
+        frame = tk.Frame(root, bg="#1a1a1a", highlightbackground="#333", highlightthickness=1)
+        frame.pack(fill="both", expand=True)
+
+        dot = tk.Label(frame, text="\u25cf", fg=COLORS[STATE_IDLE], bg="#1a1a1a",
+                       font=("Segoe UI", 16))
+        dot.pack(side="left", padx=(10, 5), pady=8)
+
+        status = tk.Label(frame, text=TEXTS[STATE_IDLE], fg="white", bg="#1a1a1a",
+                          font=("Segoe UI", 10))
+        status.pack(side="left", padx=5)
+
+        label = tk.Label(frame, text=LABELS[STATE_IDLE], fg="#999", bg="#1a1a1a",
+                         font=("Segoe UI", 9))
+        label.pack(side="right", padx=10)
+
+        def update():
+            s = get_state()
+            dot.config(fg=COLORS.get(s, COLORS[STATE_IDLE]))
+            status.config(text=TEXTS.get(s, TEXTS[STATE_IDLE]))
+            label.config(text=LABELS.get(s, LABELS[STATE_IDLE]))
+            root.after(250, update)
+
+        root.after(250, update)
+        root.mainloop()
+    except Exception as e:
+        log(f"Indicator no disponible: {e}")
 
 
 def main():
@@ -257,18 +352,16 @@ def main():
         log("ERROR FATAL: No hay GROQ_API_KEY")
         return
 
-    t1 = threading.Thread(target=audio_capture_loop, daemon=True)
-    t2 = threading.Thread(target=file_watcher_loop, daemon=True)
-    t1.start()
-    t2.start()
+    t_audio = threading.Thread(target=audio_capture_loop, daemon=True)
+    t_watch = threading.Thread(target=file_watcher_loop, daemon=True)
+    t_audio.start()
+    t_watch.start()
 
     log("Voice Agent listo")
 
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        log("Voice Agent detenido")
+    indicator_loop()
+
+    log("Voice Agent detenido")
 
 
 if __name__ == "__main__":

@@ -1,3 +1,15 @@
+<#
+.SYNOPSIS
+  Instala / desinstala el Voice Agent de OpenCode en Startup de Windows
+.DESCRIPTION
+  Crea un acceso directo en shell:startup para que voice-agent.pyw
+  se ejecute automaticamente al iniciar Windows, en segundo plano.
+.EXAMPLE
+  .\install-agent.ps1 -Install
+  .\install-agent.ps1 -Uninstall
+  .\install-agent.ps1 -Status
+#>
+
 param(
   [ValidateSet("Install", "Uninstall", "Status")]
   [string]$Action = "Install"
@@ -11,26 +23,29 @@ $ShortcutPath = Join-Path $ShortcutDir "voice-agent.lnk"
 
 function Install {
   if (-not (Test-Path $AgentScript)) {
-    Write-Host "[ERROR] voice-agent.pyw no encontrado" -ForegroundColor Red
+    Write-Host "[ERROR] voice-agent.pyw no encontrado en $ScriptDir" -ForegroundColor Red
     exit 1
   }
 
+  # Crear acceso directo en shell:startup
   $WScriptShell = New-Object -ComObject WScript.Shell
   $Shortcut = $WScriptShell.CreateShortcut($ShortcutPath)
   $Shortcut.TargetPath = "pythonw.exe"
   $Shortcut.Arguments = "`"$AgentScript`""
   $Shortcut.WorkingDirectory = "$env:USERPROFILE"
-  $Shortcut.WindowStyle = 7
+  $Shortcut.WindowStyle = 7  # Minimized
   $Shortcut.Description = "Voice Agent - OpenCode voice integration"
   $Shortcut.Save()
 
-  $KillBat = "$env:USERPROFILE\.opencode\stop-agent.bat"
-  '@echo off
-  echo Deteniendo Voice Agent...
-  taskkill /f /im pythonw.exe >nul 2>&1
-  echo Voice Agent detenido.
-  pause
-  '@ | Out-File -FilePath $KillBat -Encoding ASCII
+  # Crear tambien un .bat para matar facil
+  $KillBat = Join-Path (Split-Path $ScriptDir) ".opencode\stop-agent.bat"
+@"
+@echo off
+echo Deteniendo Voice Agent...
+taskkill /f /im pythonw.exe >nul 2>&1
+echo Voice Agent detenido.
+pause
+"@ | Out-File -FilePath $KillBat -Encoding ASCII
 
   Write-Host ""
   Write-Host "====================================" -ForegroundColor Cyan
@@ -43,6 +58,7 @@ function Install {
   Write-Host ""
   Write-Host "Para detenerlo:" -ForegroundColor Yellow
   Write-Host "  $env:USERPROFILE\.opencode\stop-agent.bat" -ForegroundColor White
+  Write-Host "  (o mata el proceso pythonw.exe)" -ForegroundColor Yellow
   Write-Host ""
   Write-Host "Logs: $LogFile" -ForegroundColor Gray
 }
@@ -57,13 +73,15 @@ function Uninstall {
 }
 
 function Status {
-  $running = Get-Process pythonw -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match "voice-agent" }
+  $running = Get-Process pythonw -ErrorAction SilentlyContinue | Where-Object {
+    $_.CommandLine -match "voice-agent"
+  }
   $installed = Test-Path $ShortcutPath
 
   Write-Host ""
   Write-Host "=== Voice Agent Status ===" -ForegroundColor Cyan
   if ($installed) {
-    Write-Host "  Startup:    INSTALADO" -ForegroundColor Green
+    Write-Host "  Startup:    INSTALADO (se inicia con Windows)" -ForegroundColor Green
   } else {
     Write-Host "  Startup:    NO INSTALADO" -ForegroundColor Yellow
   }
